@@ -2,40 +2,73 @@ from nonebot.log import logger
 from nonebot.matcher import Matcher
 from nonebot.plugin import PluginMetadata
 from nonebot.adapters.onebot.v11 import MessageEvent, MessageSegment
-from nonebot import on_keyword, require, get_bot, get_bots
+from nonebot import on_keyword, require, get_bot, get_bots, get_driver
 from httpx import Response, AsyncClient
+import http.client
 import datetime
+from .config import Config
+
+__plugin_meta__ = PluginMetadata(
+    name="命运方舟流浪商人卡牌刷新提示",
+    description="国服命运方舟流浪商人史诗传说卡牌刷新提示",
+    usage="插件用法",
+    type="application",
+    homepage="{项目主页}",
+    config=Config,
+    extra={},
+)
 
 require("nonebot_plugin_apscheduler")
 
 from nonebot_plugin_apscheduler import scheduler
 
-@scheduler.scheduled_job("cron", minute="*/1", id="check_trader", args=[1], kwargs={"arg2": 2})
-async def check_trader(arg1, arg2):
-    bot = get_bot(str(2692607936))
-    now = datetime.datetime.now()
+plugin_config = Config.parse_obj(get_driver().config).trader
 
-    hour = str(now.hour)
+@scheduler.scheduled_job("cron", minute=f"*/{plugin_config.time}", id="check_trader")
+async def check_trader():
+    bots = get_bots().values()
+    for bot in bots:
+        now = datetime.datetime.now()
 
-    date = datetime.datetime.now().date().isoformat()
-    time_start = datetime.datetime.strptime( date + ' ' + hour + ':30:00', '%Y-%m-%d %H:%M:%S')
-    time_one = datetime.datetime.strptime( date + ' ' + hour + ':35:00', '%Y-%m-%d %H:%M:%S')
-    time_two = datetime.datetime.strptime( date + ' ' + hour + ':55:00', '%Y-%m-%d %H:%M:%S')
+        hour = str(now.hour)
 
-    response = ''
+        date = datetime.datetime.now().date().isoformat()
+        time_start = datetime.datetime.strptime( date + ' ' + hour + ':30:00', '%Y-%m-%d %H:%M:%S')
+        time_one = datetime.datetime.strptime( date + ' ' + hour + ':35:00', '%Y-%m-%d %H:%M:%S')
+        time_two = datetime.datetime.strptime( date + ' ' + hour + ':55:00', '%Y-%m-%d %H:%M:%S')
 
-    if now < time_two and now > time_one:
-        result = await get_detail(int(time_start.timestamp()))
-        if len(result) != 0:
-            for item in enumerate(result):
-                card = item.get('_card', {})
-                rarity = card.get('rarity', '')
-                if rarity == 'Rare':
-                    response = response + '出卡牌了！'
-                    await bot.call_api('send_private_msg', **{
-                        'user_id': 464723943,
-                        'message': response
-                    })
+        response = ''
+
+        if now < time_two and now > time_one:
+            result = await get_detail(int(time_start.timestamp()))
+            if len(result) != 0:
+                for item in result:
+                    card = item.get('_card', {})
+                    rarity = card.get('rarity', '')
+                    if rarity == 'Epic' or rarity == 'Legendary':
+                        location = item.get('_location', {})
+                        lname = location.get('name', '')
+                        cname = card.get('name', '')
+                        image = location.get('snapshot', '')
+                        response = lname + f' 出{cname}了！'
+                        for qq in plugin_config.user_ids:
+                            await bot.call_api('send_private_msg', **{
+                                'user_id': qq,
+                                'message': response
+                            })
+                            await bot.call_api('send_private_msg', **{
+                                'user_id': qq,
+                                'message': MessageSegment.image(f"https://www.emrpg.com/{image}")
+                            })
+                        for group in plugin_config.group_ids:
+                            await bot.call_api('send_group_msg', **{
+                                'group_id': group,
+                                'message': response
+                            })
+                            await bot.call_api('send_group_msg', **{
+                                'group_id': group,
+                                'message': MessageSegment.image(f"https://www.emrpg.com/{image}")
+                            })
             
 
 trader = on_keyword({"商人"}, priority=1)
@@ -50,7 +83,7 @@ async def get_detail(displayAt):
         'Host': 'www.emrpg.com',
         'Connection': 'keep-alive'
         }
-        res = await client.get(f"https://www.emrpg.com/plugin.php?displayAt={displayAt}&fromServer=lostarkcn&serverId=14&uri=merchants/active&_pipes=withCard,withRapport,withLocation,withMember&id=tj_emrpg", headers=headers)
+        res = await client.get(f"https://www.emrpg.com/plugin.php?displayAt={displayAt}&fromServer=lostarkcn&serverId={plugin_config.server_id}&uri=merchants/active&_pipes=withCard,withRapport,withLocation,withMember&id=tj_emrpg", headers=headers)
         result = res.json().get('data' , [])
         return result
 
@@ -64,7 +97,7 @@ async def get_data():
         'Host': 'www.emrpg.com',
         'Connection': 'keep-alive'
         }
-        res = await client.get("https://www.emrpg.com/plugin.php?fromServer=lostarkcn&serverId=14&uri=merchants/list&id=tj_emrpg", headers=headers)
+        res = await client.get(f"https://www.emrpg.com/plugin.php?fromServer=lostarkcn&serverId={plugin_config.server_id}&uri=merchants/list&id=tj_emrpg", headers=headers)
         result = res.json().get('data' , [])
         return result
 
@@ -74,25 +107,35 @@ async def _(matcher: Matcher, event: MessageEvent):
 
     if args := event.get_plaintext():
         if args == "下一个商人":
-            result = await get_data()
-            if len(result) != 0:
-                response = ''
-                for index,item in enumerate(result):
-                    now = datetime.datetime.now()
-                    # now_str = now.strftime('%H:%M:%S')
-                    times = item.get('times', [])
-                    for time in times:
-                        date = datetime.datetime.now().date().isoformat()
-                        time_obj = datetime.datetime.strptime( date + ' ' + time, '%Y-%m-%d %H:%M:%S')
-                        if now.__lt__(time_obj):
-                            response = response + item.get('region', '未知地区') + '的' + item.get('name', '未知商人') + '，即将在 ' + time_obj.strftime('%H:%M:%S')  + ' 时出现' + '\n'
-                            break
-                    # if index != len(result) - 1:
-                    #     response = response + item.get('region', '未知地区') + '的' + item.get('name', '未知商人') + '\n'
-                    # else:
-                    #     response = response + item.get('region', '未知地区') + '的' + item.get('name', '未知商人')
-                response = response + 'by: EmiyaGm'
-                await trader.finish(response)
+            now = datetime.datetime.now()
+            hour = str(now.hour)
+
+            date = datetime.datetime.now().date().isoformat()
+            time_start = datetime.datetime.strptime( date + ' ' + hour + ':30:00', '%Y-%m-%d %H:%M:%S')
+            time_two = datetime.datetime.strptime( date + ' ' + hour + ':55:00', '%Y-%m-%d %H:%M:%S')
+            if now < time_two and now > time_start:
+                response = '商人正在出现'
             else:
-                await trader.finish("暂无数据")
+                result = await get_data()
+                if len(result) != 0:
+                    response = ''
+                    for index,item in enumerate(result):
+                        now = datetime.datetime.now()
+                        # now_str = now.strftime('%H:%M:%S')
+                        times = item.get('times', [])
+                        for time in times:
+                            date = datetime.datetime.now().date().isoformat()
+                            time_obj = datetime.datetime.strptime( date + ' ' + time, '%Y-%m-%d %H:%M:%S')
+                            if now.__lt__(time_obj):
+                                response = response + item.get('region', '未知地区') + '的' + item.get('name', '未知商人') + '，即将在 ' + time_obj.strftime('%H:%M:%S')  + ' 时出现' + '\n'
+                                break
+                        # if index != len(result) - 1:
+                        #     response = response + item.get('region', '未知地区') + '的' + item.get('name', '未知商人') + '\n'
+                        # else:
+                        #     response = response + item.get('region', '未知地区') + '的' + item.get('name', '未知商人')
+                    response = response + 'by: EmiyaGm'
+                else:
+                    response = '暂无数据'
+            await trader.finish(response)
+
 
